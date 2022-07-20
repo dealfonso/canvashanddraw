@@ -27,7 +27,7 @@
         antiAliasing: true
     }
 
-    exports.canvasDraw = {
+    exports.canvasHandDraw = {
         default_options: default_options
     }
 
@@ -415,7 +415,7 @@
             });
         }        
     }
-    class HandDraw {
+    class CanvasHandDraw {
         constructor(el, options = {}) {
             // Adjust the options with the data-* attributes
             this._options = mergeobjects({}, options);
@@ -491,7 +491,7 @@
     }
     function init() {
         document.querySelectorAll('canvas').forEach(function(el) {
-            el.handDraw = new HandDraw(el, {});
+            el.canvasHandDraw = new CanvasHandDraw(el, {});
             let parent = el.parentElement;
             el.width = parent.clientWidth;
             el.height = parent.clientHeight;
