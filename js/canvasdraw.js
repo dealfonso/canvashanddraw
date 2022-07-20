@@ -15,14 +15,16 @@
 */
 (function(document, exports = {}) {
     let default_options = {
-        temporaryCanvasSize: 32,
-        temporaryCanvasMargin: 2,
-        delayMsBetweenDrawing: 10,
-        lineWidth: 2,
+        temporaryCanvasSize: 64,
+        temporaryCanvasMargin: 4,
+        delayMsBetweenStrokes: 10,
+        lineWidth: 4,
         lineColor: "#000000",
         lineCap: "round",
-        drawDynamics: false,
-        simulatePressure: false
+        drawDynamics: true,
+        animate: true,
+        maxPoints: 0,
+        antiAliasing: true
     }
 
     exports.canvasDraw = {
@@ -160,7 +162,7 @@
                 return;
             }
 
-            if (this._options.temporaryCanvasSize < 0) {
+            if (this._options.temporaryCanvasSize <= 0) {
                 // Not want a temporary canvas
                 return;
             }
@@ -186,6 +188,49 @@
             }
         }
 
+        _makeMovement(ctx, p0, p1, p2, p3, dx, dy) {
+            /**
+             * Draws the line between p1 and p2, but considering that the previous point was p0 and the next point is p3, so that 
+             *   the intersection of the two vectors can be calculated and such intersection is used as the control point of a
+             *   quadratic curve to draw the line.
+             * @param {CanvasRenderingContext2D} ctx - the context of the canvas
+             * @param {Point} p0 - the previous point
+             * @param {Point} p1 - the first point
+             * @param {Point} p2 - the second point
+             * @param {Point} p3 - the next point
+             * @param {number} dx - the offset x of the canvas
+             * @param {number} dy - the offset y of the canvas
+             * @param {number} m - the precalculated size of the size between p1 and p2
+             */
+            ctx.moveTo(p1.x + dx, p1.y + dy);
+            if ((p0 === null) || (p1 === null) || (p2 === null) || (p3 === null)) {
+                ctx.lineTo(p2.x + dx, p2.y + dy);
+            } else {
+                let d0 = {
+                    x: p1.x - p0.x,
+                    y: p1.y - p0.y
+                }
+                let d2 = {
+                    x: p3.x - p2.x,
+                    y: p3.y - p2.y
+                }
+                let b = (p0.y + (d0.y * ((p2.x - p0.x) / d0.x)) - p2.y) / (d2.y - (d2.x * d0.y) / d0.x);
+                if (isNaN(b)) {
+                    b = (p0.x + (d0.x * ((p2.y - p0.y) / d0.y)) - p2.x) / (d2.x - (d2.y * d0.x) / d0.y);
+                }
+                let c = {
+                    x: p0.x + (d0.x * b),
+                    y: p0.y + (d0.y * b)
+                }
+                // We are filtering out the points that are too close to the line and those that are too far
+                if ((isNaN(b)) || (!isFinite(b)) || (Math.abs(b) > 10)) {
+                    ctx.lineTo(p2.x + dx, p2.y + dy);
+                } else {
+                    ctx.quadraticCurveTo(c.x + dx, c.y + dy, p2.x + dx, p2.y + dy);
+                }
+            }
+        }
+
         clear() {
             let ctx = this.el.getContext('2d');
             ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -198,56 +243,83 @@
          * @param {*} dy Offset in y direction
          * @param {*} count Amount of points to draw
          */
-        drawPoints(ctx, points, dx, dy, count = null) {
+         drawPoints(ctx, points, dx, dy, count = null, variableLineWidth = true, smoothWidth = 0) {
+            if (smoothWidth <= 0) {
+                // Less or equal to accept smoothWidth as "false"
+                smoothWidth = 0;
+            }
             if (count == null) {
                 count = points.length;
             }
             if (count > points.length) {
                 count = points.length;
             }
-            let moveto = true;
+            let p0 = null;
+            let p1 = null;
+            let p2 = null;
+            let p3 = null;
+
+            // This is the size of the line to be considered as the "quickest drawing"
+            let fQuick = Math.sqrt(Math.min(ctx.canvas.width, ctx.canvas.height));
+            // When considered a quick line, this is the size of the line
+            let fQuickSize = 0.5;
+
             ctx.save();
-            let p_point = { x: 0, y: 0 };
+            let moveto = true;
             for (let i = 0; i < count; i++) {
-                if (points[i] == null) {
+                p2 = points[i];
+                p3 = null;
+                if (p2 == null) {
                     moveto = true;
                     continue;
                 }
+                if (i < count - 1) {
+                    p3 = points[i + 1];
+                }
                 if (moveto) {
-                    ctx.moveTo(points[i].x + dx, points[i].y + dy);
-                    p_point = points[i];
+                    // Not needed, because we are drawing by segments
+                    // ctx.moveTo(p2.x + dx, p2.y + dy);
+                    p0 = null;
+                    p1 = null;
                     moveto = false;
                 } else {
-                    if (this._options.drawDynamics) {
-                        let mX = p_point.x - points[i].x;
-                        let mY = p_point.y - points[i].y;
-                        let m = Math.sqrt(mX * mX + mY * mY);
-                        let relLength = (m * 16) / ctx.canvas.width;
-                        let lineWidth = Math.round(this._options.lineWidth - (this._options.lineWidth-1) * relLength);
-
-                        if (this._options.simulatePressure) {
-                            if (lineWidth < this._options.lineWidth) {
-                                ctx.save();
-                                ctx.lineWidth = Math.ceil((lineWidth + this._options.lineWidth) / 2);
-                                ctx.strokeStyle = pSBC(0.60, this._options.lineColor);
-                                ctx.beginPath();
-                                ctx.moveTo(p_point.x + dx, p_point.y + dy);
-                                ctx.lineTo(points[i].x + dx, points[i].y + dy);
-                                ctx.stroke();
-                                ctx.restore();
-                            }
-                        }
-                        ctx.lineWidth = lineWidth;
+                    let actualLineWidth = this._options.lineWidth;
+                    if (variableLineWidth) {
+                        // We need to calculate the actual line width. To do so, we need to calculate what means a "quick" line, to 
+                        //   be drawin in a smaller size.
+                        // The quick line is a line that is drawn between two points that are far apart. We consider that a line is
+                        //   "quick" if is is longer than the square root of the size of the canvas (fQuick). And such line is drawn
+                        //   in a size which is a percentage (fQuickSize) of the size of the line. The variations in the size of the
+                        //   line will be applied as proportional to the difference between the smallest and biggest line size.
+                        let mX = p2.x - p1.x;
+                        let mY = p2.y - p1.y;
+                        let m = Math.sqrt(mX * mX + mY * mY);    
+                        let relLength = Math.min(1, m/fQuick);
+                        let relSize = Math.round((1 - relLength * (1 - fQuickSize)) * this._options.lineWidth);
+                        actualLineWidth = relSize;
                     }
-                    ctx.beginPath();
-                    ctx.moveTo(p_point.x + dx, p_point.y + dy);
-                    ctx.lineTo(points[i].x + dx, points[i].y + dy);
-                    ctx.stroke();
-                    p_point = points[i];
+
+                    // If not smoothing the line, the line will be always drawn, and we'll also draw if the lineWidth is smaller
+                    //   this is because, when not smoothing the line, it will mean that we are drawing the front color. And if 
+                    //   the lineWidth is smaller, it will mean that we want to either draw the front color with a smaller sized
+                    //   line or we are drawing the shadow color to antialiase the line.
+                    // If smooting the line (i.e., antialiasing), but the actualLineWidth is the same, we do not have the need of
+                    //   antialiasing in this stroke. This is why we are not drawing in this case.
+                    if ((smoothWidth === 0) || (actualLineWidth < this._options.lineWidth)) {
+                        ctx.save();
+                        ctx.beginPath();
+                        ctx.lineWidth = ((1 - smoothWidth) * actualLineWidth) + (this._options.lineWidth * smoothWidth);
+                        this._makeMovement(ctx, p0, p1, p2, p3, dx, dy);
+                        ctx.stroke();
+                        ctx.restore();
+                    }
                 }
+                p0 = p1;
+                p1 = p2;
             }
             ctx.restore();
         }
+
         cancel() {
             /**
              * Cancels the drawing.
@@ -256,6 +328,9 @@
         }
 
         _cancelAnimation() {
+            /**
+             * Effectively does the tasks to cancel the animation
+             */
             if (this.interval != null) {
                 clearInterval(this.interval);
                 this.interval = null;
@@ -265,8 +340,13 @@
         }
 
         drawAnimated() {
+            /**
+             * Draws the animated line.
+             * 
+             * (*) Not using requestAnimationFrame because we want to control the drawing speed more easily.
+             */
             let points = this._points.getPoints();
-            let count = 0;
+            let count = this._options.delayMsBetweenStrokes<=0?Math.min((this._options.maxPoints<=0)?points.length:this._options.maxPoints, points.length):0;
 
             // Prepare the temporary canvas (if needed)
             this._cancelAnimation();
@@ -285,14 +365,34 @@
                         return;
                     }
 
-                    // Not using requestAnimationFrame because we want to control the drawing speed more easily.
-
                     // Get the canvas context, just in case it was changed before drawing
                     var ctx = this.el.getContext('2d');
 
+                    let tmpCtx = ctx;
+                    let marginX = 0;
+                    let marginY = 0;
                     if (this.tmpCanvas !== null) {
-                        let tmpCtx = this.tmpCanvas.getContext('2d');
+                        tmpCtx = this.tmpCanvas.getContext('2d');
+                        marginX = this._options.temporaryCanvasMargin;
+                        marginY = this._options.temporaryCanvasMargin;
+                    }
 
+                    // Draw in the temporary canvas.
+                    tmpCtx.clearRect(0, 0, tmpCtx.canvas.width, tmpCtx.canvas.height);
+                    if (this._options.drawDynamics && this._options.antiAliasing) {
+                        let colorLighten1 = pSBC(0.6, this._options.lineColor);
+                        let colorLighten2 = pSBC(0.8, this._options.lineColor);
+                        tmpCtx.strokeStyle = colorLighten1;
+                        this.drawPoints(tmpCtx, points, marginX, marginY, count, true, 1);
+
+                        tmpCtx.strokeStyle = colorLighten2;
+                        this.drawPoints(tmpCtx, points, marginX, marginY, count, true, 0.8);
+                    }
+
+                    tmpCtx.strokeStyle = this._options.lineColor;
+                    this.drawPoints(tmpCtx, points, marginX, marginY, count, this._options.drawDynamics);
+
+                    if (this.tmpCanvas !== null) {
                         // Calculate the position and size of the place to copy the scaled drawing
                         let sX = ctx.canvas.width / this._options.temporaryCanvasSize;
                         let sY = ctx.canvas.height / this._options.temporaryCanvasSize;
@@ -300,26 +400,18 @@
                         let oX = (ctx.canvas.width - (this._options.temporaryCanvasSize * scale)) / 2;
                         let oY = (ctx.canvas.height - (this._options.temporaryCanvasSize * scale)) / 2;
 
-                        // Draw in the temporary canvas.
-                        tmpCtx.clearRect(0, 0, this._options.temporaryCanvasSize, this._options.temporaryCanvasSize);
-                        this.drawPoints(tmpCtx, points, this._options.temporaryCanvasMargin, this._options.temporaryCanvasMargin, count);
-
                         // Copy the temporary canvas to the real one (scaling)
                         ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
                         ctx.drawImage(this.tmpCanvas, 0, 0, this._options.temporaryCanvasSize, this._options.temporaryCanvasSize, oX, oY, this._options.temporaryCanvasSize * scale, this._options.temporaryCanvasSize * scale);
-                    } else {
-                        // Draw the points in the real canvas
-                        ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-                        this.drawPoints(ctx, points, 0, 0, count);
                     }
 
-                    if (count == points.length) {
+                    if (count == Math.min((this._options.maxPoints<=0)?points.length:this._options.maxPoints, points.length)) {
                         this._cancelAnimation();
                         resolve();
                         return;
                     }
                     count++;
-                }.bind(this), this._options.delayMsBetweenDrawing);
+                }.bind(this), this._options.delayMsBetweenStrokes);
             });
         }        
     }
@@ -329,7 +421,7 @@
             this._options = mergeobjects({}, options);
             let delay = parseInt(el.getAttribute('data-delay'));
             if (! isNaN(delay)) {
-                this._options.delayMsBetweenDrawing = delay;
+                this._options.delayMsBetweenStrokes = delay;
             }
             let drawDynamics = el.getAttribute('data-draw-dynamics');
             if (drawDynamics !== null) {
