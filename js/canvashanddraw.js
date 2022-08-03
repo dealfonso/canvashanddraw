@@ -15,20 +15,42 @@
 */
 (function(document, exports = {}) {
     let default_options = {
+        // This is the size of the temporary canvas in which the points are drawn. Later this canvas
+        //   is copied and scaled to the final canvas, so this determines the resolution.
         temporaryCanvasSize: 64,
+        // The margin of the drawn points in the temporary canvas (it is the same for each side)
         temporaryCanvasMargin: 4,
+        // The delay MS between drawing the strokes between each point. Setting this to any value makes
+        //   the effect of the animation of hand drawing the points, while setting it to 0 makes the 
+        //   effect of having the final draw.
         delayMsBetweenStrokes: 10,
+        // Maximum width of to make the drawing (if using drawing dynamics, the line will be thinner when
+        //   the strokes are faster).
         lineWidth: 4,
+        // Main color for the drawing (if using antialiasing, will lighten this color for the borders)
         lineColor: "#000000",
+        // The kind of cap for the strokes (round, butt, square: see CanvasRenderingContext2D.lineCap)
         lineCap: "round",
+        // Use drawing dynamics (if true, the line width will be thinner when the strokes are faster and
+        //   wider when the strokes are slower)
         drawDynamics: true,
-        animate: true,
+        // Maximum number of points to draw. If zero or less, all the points will be drawn.
         maxPoints: 0,
-        antiAliasing: true
+        // Use antialiasing (if true, the faster strokes will be drawn with a lighter color for the borders)
+        //   (*) This is only used if the drawing dynamics are enabled.
+        antiAliasing: true,
+        // Reduce the number of points to be drawn by eliminating the points that are closer to the line between the
+        //  previous and next points.
+        reducePoints: true
     }
 
-    exports.canvasHandDraw = {
-        default_options: default_options
+    function distance(p1, p2, p) {
+        // Calculate the distance of point p to line p1p2
+        let den = Math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2);
+        if (den == 0) {
+            return null;
+        }
+        return Math.abs((p2.x - p1.x) * (p1.y - p.y) - (p2.y - p1.y) * (p1.x - p.x)) / den;
     }
 
     function pSBC(p,c0,c1,l){
@@ -70,19 +92,76 @@
 
     class Points {
         constructor(p_list) {
+            if (p_list === null) {
+                p_list = [];
+            }
             let points = [ null ];
             for (let i = 0; i < p_list.length; i++) {
-                if (!p_list[i]["x"] || !p_list[i]["y"]) {
+                if (p_list[i] === null) {
                     points.push(null);
                     continue;
                 }
-                points.push({x: p_list[i]["x"], y: p_list[i]["y"]});
+                let x = p_list[i].x;
+                let y = p_list[i].y;
+                if (x === null || y === null || x === undefined || y === undefined) {
+                    points.push(null);
+                    continue;
+                }
+                points.push({x: x, y: y});
             }
             this.points = points;
-            this.normalized = NaN;
         }
-        normalize(size = 200) {
-            this.normalized = size;
+        reduce_points() {
+            /** Reduces the number of points in the list by removing the points that are too close to the line between the prior and the next one */
+            if (this.points.length < 2) {
+                return;
+            }
+            let p0 = this.points[0];
+            let p1 = this.points[1];
+            let points = [];
+            let p2 = null;
+            for (let i = 2; i < this.points.length; i++) {
+                let advance = true;
+                p2 = this.points[i];
+
+                if ((p0 !== null) && (p1 !== null)) {
+                    if (p2 === null) {
+                        // End of path; need to add the points
+                        points.push(p1);
+                        points.push(p2);
+                        p0 = null;
+                        p1 = null;
+                    } else {
+
+                        let d = distance(p0, p2, p1);
+                        if (d === null) {
+                            advance = false;
+                        } else {
+                            if (d > 0.1) {
+                                points.push(p1);
+                            } else {
+                                advance = false;
+                            }
+                        }
+                    }
+                } else {
+                    if (p1 !== null) {
+                        points.push(p1);
+                    }
+                }
+                if (advance) {
+                    p0 = p1;
+                }
+                p1 = p2;
+            }
+            points.push(p2)
+            this.points = points
+        }
+
+        normalize(width, height = null, keepAspectRatio = true) {
+            if (height === null) {
+                height = width;
+            }
             let min_x = NaN;
             let min_y = NaN;
             let max_x = NaN;
@@ -106,18 +185,22 @@
             }
             let dx = max_x - min_x;
             let dy = max_y - min_y;
-            let d = Math.max(dx, dy);
-            let scale = size / d;
-            let offset_x = (d - dx) / 2;
-            let offset_y = (d - dy) / 2;
+            let scaleX = width / dx;
+            let scaleY = height / dy;
+            if (keepAspectRatio) {
+                scaleX = scaleY = Math.min(scaleX, scaleY);
+            }
+            let offset_x = (width - dx * scaleX) / 2;
+            let offset_y = (height - dy * scaleY) / 2;
             for (let i = 0; i < this.points.length; i++) {
                 if (this.points[i] == null) {
                     continue;
                 }
-                this.points[i].x = (this.points[i].x - min_x + offset_x) * scale;
-                this.points[i].y = (this.points[i].y - min_y + offset_y) * scale;
+                this.points[i].x = (this.points[i].x - min_x) * scaleX + offset_x;
+                this.points[i].y = (this.points[i].y - min_y) * scaleY + offset_y;
             }
         }
+
         getPoints() {
             return this.points;
         }
@@ -147,13 +230,22 @@
 
             // Prepare the points to be drawn
             this._points = new Points(points);
+            if (this._options.reducePoints) {
+                this._points.reduce_points();
+            }
             if (this._options.temporaryCanvasSize > 0) {
                 this._options.temporaryCanvasMargin += Math.ceil(this._options.lineWidth / 2);
                 this._points.normalize(this._options.temporaryCanvasSize - (this._options.temporaryCanvasMargin * 2));
             }
-
             // Initialize to null, ready to be prepared
             this.tmpCanvas = null;
+        }
+
+        getPoints() {
+            /**
+             * Returns the points to be drawn.
+             */
+            return this._points.getPoints();
         }
 
         _prepareTmpCanvas() {
@@ -203,7 +295,9 @@
              * @param {number} m - the precalculated size of the size between p1 and p2
              */
             ctx.moveTo(p1.x + dx, p1.y + dy);
-            if ((p0 === null) || (p1 === null) || (p2 === null) || (p3 === null)) {
+            let l = Math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2);
+
+            if ((p0 === null) || (p3 === null) || (l < this._options.lineWidth)) {
                 ctx.lineTo(p2.x + dx, p2.y + dy);
             } else {
                 let d0 = {
@@ -222,8 +316,14 @@
                     x: p0.x + (d0.x * b),
                     y: p0.y + (d0.y * b)
                 }
+
+                // We are now checking if the control point is too far from the line (relatively), if so we will move it to the line                
+                let dp1c = Math.sqrt((p1.x - c.x) ** 2 + (p1.y - c.y) ** 2);
+                let dp2c = Math.sqrt((p2.x - c.x) ** 2 + (p2.y - c.y) ** 2);
+                let dr = Math.max(dp1c, dp2c) / l;
+
                 // We are filtering out the points that are too close to the line and those that are too far
-                if ((isNaN(b)) || (!isFinite(b)) || (Math.abs(b) > 10)) {
+                if ((isNaN(b)) || (!isFinite(b)) || (dr > 3)) {
                     ctx.lineTo(p2.x + dx, p2.y + dy);
                 } else {
                     ctx.quadraticCurveTo(c.x + dx, c.y + dy, p2.x + dx, p2.y + dy);
@@ -396,13 +496,15 @@
                         // Calculate the position and size of the place to copy the scaled drawing
                         let sX = ctx.canvas.width / this._options.temporaryCanvasSize;
                         let sY = ctx.canvas.height / this._options.temporaryCanvasSize;
-                        let scale = Math.min(sX, sY);
-                        let oX = (ctx.canvas.width - (this._options.temporaryCanvasSize * scale)) / 2;
-                        let oY = (ctx.canvas.height - (this._options.temporaryCanvasSize * scale)) / 2;
+                        if (! this._options.keepAspectRatio) {
+                            sX = sY = Math.min(sX, sY);
+                        }
+                        let oX = (ctx.canvas.width - (this._options.temporaryCanvasSize * sX)) / 2;
+                        let oY = (ctx.canvas.height - (this._options.temporaryCanvasSize * sY)) / 2;
 
                         // Copy the temporary canvas to the real one (scaling)
                         ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-                        ctx.drawImage(this.tmpCanvas, 0, 0, this._options.temporaryCanvasSize, this._options.temporaryCanvasSize, oX, oY, this._options.temporaryCanvasSize * scale, this._options.temporaryCanvasSize * scale);
+                        ctx.drawImage(this.tmpCanvas, 0, 0, this._options.temporaryCanvasSize, this._options.temporaryCanvasSize, oX, oY, this._options.temporaryCanvasSize * sX, this._options.temporaryCanvasSize * sY);
                     }
 
                     if (count == Math.min((this._options.maxPoints<=0)?points.length:this._options.maxPoints, points.length)) {
@@ -416,9 +518,12 @@
         }        
     }
     class CanvasHandDraw {
+        // Store the default options
+        static default_options = default_options;
+
         constructor(el, options = {}) {
             // Adjust the options with the data-* attributes
-            this._options = mergeobjects({}, options);
+            this._options = Object.assign({}, options);
             let delay = parseInt(el.getAttribute('data-delay'));
             if (! isNaN(delay)) {
                 this._options.delayMsBetweenStrokes = delay;
@@ -426,6 +531,17 @@
             let drawDynamics = el.getAttribute('data-draw-dynamics');
             if (drawDynamics !== null) {
                 this._options.drawDynamics = drawDynamics.toLowerCase() === 'true';
+            }
+            let reducePoints = el.getAttribute('data-reduce-points');
+            if (reducePoints !== null) {
+                this._options.reducePoints = reducePoints.toLowerCase() === 'true';
+            }
+            let maxPoints = el.getAttribute('data-max-points');
+            if (maxPoints !== null) {
+                maxPoints = parseInt(maxPoints);
+                if (!isNaN(maxPoints)) {
+                    this._options.maxPoints = maxPoints;
+                }
             }
 
             // Prepare the rest of the object
@@ -450,7 +566,7 @@
          * @param {*} points Array of points to draw ([{x: x, y: y}, {x: x, y: y}, ...]); if no points are given, it will try to draw the points in the data-* attributes.
          * @returns {Promise} Promise that will be resolved when the drawing is finished.
          */
-        draw(points = null) {
+        draw(points = null, options = {}) {
             // If no points are given, use the data-* attributes
             if (points === null) {
                 points = JSON.parse(this.el.getAttribute('data-points'));
@@ -462,7 +578,8 @@
             }
 
             // Create the helper and draw
-            this._drawHelper = new DrawHelper(this.el, points, this._options);
+            let optionsMerged = Object.assign({}, this._options, options);
+            this._drawHelper = new DrawHelper(this.el, points, optionsMerged);
             return this._drawHelper.drawAnimated();
         }
         /**
@@ -488,9 +605,22 @@
             }
             this._drawHelper.cancel();
         }
+        getPoints() {
+            // If no previous drawing, do nothing
+            if (this._drawHelper === null) {
+                return;
+            }
+
+            // Use the previous drawing points and settings
+            return this._drawHelper.getPoints();
+        }
+        clear() {
+            let ctx = this.el.getContext('2d');
+            ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+        }
     }
     function init() {
-        document.querySelectorAll('canvas').forEach(function(el) {
+        document.querySelectorAll('canvas.canvashanddraw').forEach(function(el) {
             el.canvasHandDraw = new CanvasHandDraw(el, {});
             let parent = el.parentElement;
             el.width = parent.clientWidth;
@@ -502,4 +632,5 @@
             init();
         });
     }
+    exports.CanvasHandDraw = CanvasHandDraw;
 })(document, window);
