@@ -482,11 +482,11 @@
                     if (this._options.drawDynamics && this._options.antiAliasing) {
                         let colorLighten1 = pSBC(0.6, this._options.lineColor);
                         let colorLighten2 = pSBC(0.8, this._options.lineColor);
-                        tmpCtx.strokeStyle = colorLighten1;
-                        this.drawPoints(tmpCtx, points, marginX, marginY, count, true, 1);
-
                         tmpCtx.strokeStyle = colorLighten2;
                         this.drawPoints(tmpCtx, points, marginX, marginY, count, true, 0.8);
+
+                        tmpCtx.strokeStyle = colorLighten1;
+                        this.drawPoints(tmpCtx, points, marginX, marginY, count, true, 0.6);
                     }
 
                     tmpCtx.strokeStyle = this._options.lineColor;
